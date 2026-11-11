@@ -1768,6 +1768,73 @@ func TestPanicOnCapturingGroups(t *testing.T) {
 	NewRouter().NewRoute().Path("/{type:(promo|special)}/{promoId}.json")
 }
 
+func TestRouterInContext(t *testing.T) {
+	router := NewRouter()
+	router.HandleFunc("/r1", func(w http.ResponseWriter, r *http.Request) {
+		contextRouter := CurrentRouter(r)
+		if contextRouter == nil {
+			t.Fatal("Router not found in context")
+			return
+		}
+
+		route := contextRouter.Get("r2")
+		if route == nil {
+			t.Fatal("Route with name not found")
+			return
+		}
+
+		url, err := route.URL()
+		if err != nil {
+			t.Fatal("Error while getting url for r2: ", err)
+			return
+		}
+
+		_, err = w.Write([]byte(url.String()))
+		if err != nil {
+			t.Fatalf("Failed writing HTTP response: %v", err)
+		}
+	}).Name("r1")
+
+	noRouterMsg := []byte("no-router")
+	haveRouterMsg := []byte("have-router")
+	router.HandleFunc("/r2", func(w http.ResponseWriter, r *http.Request) {
+		var msg []byte
+
+		contextRouter := CurrentRouter(r)
+		if contextRouter == nil {
+			msg = noRouterMsg
+		} else {
+			msg = haveRouterMsg
+		}
+
+		_, err := w.Write(msg)
+		if err != nil {
+			t.Fatalf("Failed writing HTTP response: %v", err)
+		}
+	}).Name("r2")
+
+	t.Run("router in request context get route by name", func(t *testing.T) {
+		rw := NewRecorder()
+		req := newRequest("GET", "/r1")
+
+		router.ServeHTTP(rw, req)
+		if !bytes.Equal(rw.Body.Bytes(), []byte("/r2")) {
+			t.Fatalf("Expected output to be '/r1' but got '%s'", rw.Body.String())
+		}
+	})
+
+	t.Run("omit router from request context", func(t *testing.T) {
+		rw := NewRecorder()
+		req := newRequest("GET", "/r2")
+
+		router.OmitRouterFromContext(true)
+		router.ServeHTTP(rw, req)
+		if !bytes.Equal(rw.Body.Bytes(), noRouterMsg) {
+			t.Fatal("Router not omitted from context")
+		}
+	})
+}
+
 // ----------------------------------------------------------------------------
 // Helpers
 // ----------------------------------------------------------------------------
@@ -2114,6 +2181,24 @@ func TestMultipleDefinitionOfSamePathWithDifferentMethods(t *testing.T) {
 		}
 	})
 
+}
+
+func TestMultipleDefinitionOfSamePathWithDifferentQueries(t *testing.T) {
+	emptyHandler := func(w http.ResponseWriter, r *http.Request) {}
+
+	r := NewRouter()
+	r.HandleFunc("/api", emptyHandler).Queries("foo", "{foo:[0-9]+}").Methods(http.MethodGet)
+	r.HandleFunc("/api", emptyHandler).Queries("bar", "{bar:[0-9]+}").Methods(http.MethodGet)
+
+	req := newRequest(http.MethodGet, "/api?bar=4")
+	match := new(RouteMatch)
+	matched := r.Match(req, match)
+	if !matched {
+		t.Error("Should have matched route for methods")
+	}
+	if match.MatchErr != nil {
+		t.Error("Should have no error. Found:", match.MatchErr)
+	}
 }
 
 func TestErrMatchNotFound(t *testing.T) {
@@ -2781,6 +2866,23 @@ func TestMethodNotAllowed(t *testing.T) {
 
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("Expected status code 405 (got %d)", w.Code)
+	}
+}
+
+func TestMethodNotAllowedSubrouterWithSeveralRoutes(t *testing.T) {
+	handler := func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }
+
+	router := NewRouter()
+	subrouter := router.PathPrefix("/v1").Subrouter()
+	subrouter.HandleFunc("/api", handler).Methods(http.MethodGet)
+	subrouter.HandleFunc("/api/{id}", handler).Methods(http.MethodGet)
+
+	w := NewRecorder()
+	req := newRequest(http.MethodPut, "/v1/api")
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("Expected status code 405 (got %d)", w.Code)
 	}
 }
 

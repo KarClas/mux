@@ -20,6 +20,12 @@ var (
 	ErrMethodMismatch = errors.New("method is not allowed")
 	// ErrNotFound is returned when no route match is found.
 	ErrNotFound = errors.New("no matching route was found")
+	// RegexpCompileFunc aliases regexp.Compile and enables overriding it.
+	// Do not run this function from `init()` in importable packages.
+	// Changing this value is not safe for concurrent use.
+	RegexpCompileFunc = regexp.Compile
+	// ErrMetadataKeyNotFound is returned when the specified metadata key is not present in the map
+	ErrMetadataKeyNotFound = errors.New("key not found in metadata")
 )
 
 // NewRouter returns a new router instance.
@@ -87,6 +93,9 @@ type routeConf struct {
 
 	// If true, the http.Request context will not contain the Route.
 	omitRouteFromContext bool
+
+	// if true, the the http.Request context will not contain the router
+	omitRouterFromContext bool
 
 	// Manager for the variables from host and path.
 	regexp routeRegexpGroup
@@ -201,6 +210,10 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			} else {
 				req = requestWithRouteAndVars(req, match.Route, match.Vars)
 			}
+
+			if !r.omitRouterFromContext {
+				req = requestWithRouter(req, r)
+			}
 		}
 	}
 
@@ -270,6 +283,15 @@ func (r *Router) SkipClean(value bool) *Router {
 // CurrentRoute will yield nil with this option.
 func (r *Router) OmitRouteFromContext(value bool) *Router {
 	r.omitRouteFromContext = value
+	return r
+}
+
+// OmitRouterFromContext defines the behavior of omitting the Router from the
+// http.Request context.
+//
+// RouterFromRequest will yield nil with this option.
+func (r *Router) OmitRouterFromContext(value bool) *Router {
+	r.omitRouterFromContext = value
 	return r
 }
 
@@ -437,6 +459,7 @@ type contextKey int
 const (
 	varsKey contextKey = iota
 	routeKey
+	routerKey
 )
 
 // Vars returns the route variables for the current request, if any.
@@ -458,7 +481,14 @@ func CurrentRoute(r *http.Request) *Route {
 	return nil
 }
 
-// requestWithRouteAndVars adds the matched vars to the request ctx.
+func CurrentRouter(r *http.Request) *Router {
+	if rv := r.Context().Value(routerKey); rv != nil {
+		return rv.(*Router)
+	}
+	return nil
+}
+
+// requestWithVars adds the matched vars to the request ctx.
 // It shortcuts the operation when the vars are empty.
 func requestWithVars(r *http.Request, vars map[string]string) *http.Request {
 	if len(vars) == 0 {
@@ -477,6 +507,11 @@ func requestWithRouteAndVars(r *http.Request, route *Route, vars map[string]stri
 	if len(vars) > 0 {
 		ctx = context.WithValue(ctx, varsKey, vars)
 	}
+	return r.WithContext(ctx)
+}
+
+func requestWithRouter(r *http.Request, router *Router) *http.Request {
+	ctx := context.WithValue(r.Context(), routerKey, router)
 	return r.WithContext(ctx)
 }
 
@@ -557,7 +592,7 @@ func mapFromPairsToRegex(pairs ...string) (map[string]*regexp.Regexp, error) {
 	}
 	m := make(map[string]*regexp.Regexp, length/2)
 	for i := 0; i < length; i += 2 {
-		regex, err := regexp.Compile(pairs[i+1])
+		regex, err := RegexpCompileFunc(pairs[i+1])
 		if err != nil {
 			return nil, err
 		}
